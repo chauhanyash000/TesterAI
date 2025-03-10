@@ -729,7 +729,7 @@ class VideoConverterTestingAgent:
             self.driver_setup.close()
     
     def _generate_pdf_report(self, report: Dict[str, Any]):
-        """Generate a comprehensive PDF report with screenshots."""
+        """Generate a comprehensive PDF report with screenshots attached to each step."""
         try:
             # Import reportlab libraries
             from reportlab.lib.pagesizes import letter, landscape
@@ -746,6 +746,7 @@ class VideoConverterTestingAgent:
             styles = getSampleStyleSheet()
             title_style = styles["Heading1"]
             heading2_style = styles["Heading2"]
+            heading3_style = styles["Heading3"]
             normal_style = styles["Normal"]
             
             # Custom styles
@@ -830,28 +831,52 @@ class VideoConverterTestingAgent:
                     story.append(Paragraph(f"{i}. {recommendation}", normal_style))
                 story.append(Spacer(1, 0.25*inch))
             
-            # Add steps with screenshots section
-            story.append(Paragraph("Test Steps & Screenshots", header_style))
+            # Create a map of screenshots for each step
+            # This dictionary will store the most recent screenshot for each step number
+            step_screenshots = {}
             
-            # Create a mapping of screenshot paths to step numbers
-            screenshot_map = {}
+            # Process all screenshots and associate them with steps
             for step in report["steps"]:
-                if step["action"] == "TakeScreenshot" and step["result"]["success"]:
-                    screenshot_map[step["result"]["screenshot_path"]] = {
-                        "step": step["step"],
+                step_num = step["step"]
+                
+                # If this is a screenshot action and it was successful, store it for this step
+                if step["action"] == "TakeScreenshot" and step["result"].get("success", True):
+                    screenshot_path = step["result"]["screenshot_path"]
+                    step_screenshots[step_num] = {
+                        "path": screenshot_path,
+                        "description": step["result"]["description"]
+                    }
+                    
+                    # Also assign this screenshot to all previous steps that don't have screenshots
+                    # This ensures each step has a visual representation of the app state
+                    for prev_step in range(1, step_num):
+                        if prev_step not in step_screenshots:
+                            step_screenshots[prev_step] = {
+                                "path": screenshot_path,
+                                "description": f"Application state after step {prev_step} (captured later)"
+                            }
+            
+            # Add the initial screenshot to step 0 if it exists
+            for step in report["steps"]:
+                if step["step"] == 0 and step["action"] == "TakeScreenshot" and step["result"].get("success", True):
+                    step_screenshots[0] = {
+                        "path": step["result"]["screenshot_path"],
                         "description": step["result"]["description"]
                     }
             
-            # Add each test step
-            for step_index, step in enumerate(report["steps"]):
-                # Add step header
+            # Add step by step execution section
+            story.append(Paragraph("Step by Step Execution", header_style))
+            
+            # Add each test step with its associated screenshot
+            for step in sorted(report["steps"], key=lambda s: s["step"]):
                 step_num = step["step"]
                 action = step["action"]
                 
-                # Skip the initial automatic screenshot (step 0)
+                # Skip step 0 (initial state) in the main report flow
                 if step_num == 0:
                     continue
-                    
+                
+                # Add step header with number and action
                 story.append(Paragraph(f"Step {step_num}: {action}", heading2_style))
                 
                 # Add arguments used
@@ -872,26 +897,64 @@ class VideoConverterTestingAgent:
                 )
                 story.append(result_text)
                 
-                # Add any error messages
+                # Add any error messages or other relevant result information
                 if not success and "error" in step["result"]:
                     story.append(Paragraph(f"Error: {step['result']['error']}", normal_style))
+                elif success and "message" in step["result"]:
+                    story.append(Paragraph(f"Message: {step['result']['message']}", normal_style))
                 
-                # Add screenshot if this step has one
-                if action == "TakeScreenshot" and step["result"]["success"]:
-                    path = step["result"]["screenshot_path"]
-                    description = step["result"]["description"]
+                # Add special handling for specific action types
+                if action == "ClickElement" and step["result"].get("alert_appeared", False):
+                    story.append(Paragraph(
+                        f"Alert appeared with text: {step['result'].get('alert_text', 'Unknown')}",
+                        ParagraphStyle(
+                            'AlertStyle',
+                            parent=normal_style,
+                            textColor=colors.red,
+                            fontName='Helvetica-Bold'
+                        )
+                    ))
+                
+                # Add screenshot for this step if available
+                if step_num in step_screenshots:
+                    screenshot_info = step_screenshots[step_num]
                     
-                    # Add description
-                    story.append(Paragraph(f"Screenshot: {description}", normal_style))
+                    # Add a separator before screenshot
+                    story.append(Spacer(1, 0.1*inch))
+                    story.append(Paragraph("Screenshot:", heading3_style))
                     
-                    # Add the image with a reasonable size
-                    # Scale down large screenshots to fit the page
-                    img = Image(path)
+                    # Add screenshot description
+                    story.append(Paragraph(screenshot_info["description"], normal_style))
+                    
+                    # Add the actual screenshot image
+                    try:
+                        img = Image(screenshot_info["path"])
+                        img.drawHeight = 4*inch
+                        img.drawWidth = 6*inch
+                        story.append(img)
+                    except Exception as e:
+                        story.append(Paragraph(f"Error loading screenshot: {str(e)}", normal_style))
+                
+                # Add a separator between steps
+                story.append(Spacer(1, 0.25*inch))
+                
+                # Add a horizontal line between steps (except after the last step)
+                if step_num < report["total_steps"]:
+                    story.append(Paragraph("<hr/>", normal_style))
+                    story.append(Spacer(1, 0.25*inch))
+            
+            # Add initial state screenshot at the end as reference
+            if 0 in step_screenshots:
+                story.append(Paragraph("Initial Application State", header_style))
+                story.append(Paragraph(step_screenshots[0]["description"], normal_style))
+                
+                try:
+                    img = Image(step_screenshots[0]["path"])
                     img.drawHeight = 4*inch
                     img.drawWidth = 6*inch
                     story.append(img)
-                
-                story.append(Spacer(1, 0.25*inch))
+                except Exception as e:
+                    story.append(Paragraph(f"Error loading initial screenshot: {str(e)}", normal_style))
             
             # Build the PDF document
             doc.build(story)
